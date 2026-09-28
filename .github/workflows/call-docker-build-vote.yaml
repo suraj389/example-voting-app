@@ -20,7 +20,7 @@ on:
 jobs:
   build-test:
     name: Build Test Vote Service
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     permissions:
       contents: read
