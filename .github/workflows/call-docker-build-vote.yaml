@@ -1,82 +1,151 @@
-name: Build Vote
-# template source: https://github.com/dockersamples/.github/blob/main/templates/call-docker-build.yaml
+name: React CI Build Test
 
 on:
-  # we want pull requests so we can build(test) but not push to image registry
   push:
     branches:
-      - 'main'
-    # only build when important files change
-    paths:
-      - 'vote/**'
-      - '.github/workflows/call-docker-build-vote.yaml'
+      - main
+      - develop
+      - feature/**
+
   pull_request:
     branches:
-      - 'main'
-    # only build when important files change
-    paths:
-      - 'vote/**'
-      - '.github/workflows/call-docker-build-vote.yaml'
+      - main
+      - develop
+
+  workflow_dispatch:
 
 jobs:
-  call-docker-build:
-
-    name: Vote Call Docker Build
-
-    uses: dockersamples/.github/.github/workflows/reusable-docker-build.yaml@main
+  build-test:
+    name: Build Test Scan
+    runs-on: ubuntu-latest
 
     permissions:
       contents: read
-      packages: write # needed to push docker image to ghcr.io
-      pull-requests: write # needed to create and update comments in PRs
-    
-    secrets:
 
-      # Only needed if with:dockerhub-enable is true below
-      dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
 
-      # Only needed if with:dockerhub-enable is true below
-      dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+      ####################################################
+      # Checkout
+      ####################################################
 
-    with:
-      
-      ### REQUIRED
-      ### ENABLE ONE OR BOTH REGISTRIES
-      ### tell docker where to push.
-      ### NOTE if Docker Hub is set to true, you must set secrets above and also add account/repo/tags below
-      dockerhub-enable: true
-      ghcr-enable: true
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      ### REQUIRED 
-      ### A list of the account/repo names for docker build. List should match what's enabled above
-      ### defaults to:
-      image-names: |
-        ghcr.io/dockersamples/example-voting-app-vote
-        dockersamples/examplevotingapp_vote
-      
-      ### REQUIRED set rules for tagging images, based on special action syntax:
-      ### https://github.com/docker/metadata-action#tags-input
-      ### defaults to:
-      tag-rules: |
-        type=raw,value=latest,enable=${{ endsWith(github.ref, github.event.repository.default_branch) }}
-        type=raw,value=before,enable=${{ endsWith(github.ref, github.event.repository.default_branch) }}
-        type=raw,value=after,enable=${{ endsWith(github.ref, github.event.repository.default_branch) }}
-        type=ref,event=pr
-      
-      ### path to where docker should copy files into image
-      ### defaults to root of repository (.)
-      context: vote
-      
-      ### Dockerfile alternate name. Default is Dockerfile (relative to context path)
-      # file: Containerfile
+      ####################################################
+      # Setup Node
+      ####################################################
 
-      ### build stage to target, defaults to empty, which builds to last stage in Dockerfile
-      # target:
-      
-      ### platforms to build for, defaults to linux/amd64
-      ### other options: linux/amd64,linux/arm64,linux/arm/v7
-      platforms: linux/amd64,linux/arm64,linux/arm/v7
-      
-      ### Create a PR comment with image tags and labels
-      ### defaults to false
-      # comment-enable: false
+      - name: Setup NodeJS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      ####################################################
+      # Install Dependencies
+      ####################################################
+
+      - name: Install Dependencies
+        run: npm ci
+
+      ####################################################
+      # Lint
+      ####################################################
+
+      - name: Run Lint
+        run: npm run lint --if-present
+
+      ####################################################
+      # Build Application
+      ####################################################
+
+      - name: Build React Application
+        run: npm run build
+
+      ####################################################
+      # Docker Setup
+      ####################################################
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      ####################################################
+      # Docker Build
+      ####################################################
+
+      - name: Build Docker Image
+        run: |
+          docker build \
+            -t ddm-web-app:test \
+            .
+
+      ####################################################
+      # Trivy Scan
+      ####################################################
+
+      - name: Run Trivy Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ddm-web-app:test
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+
+      ####################################################
+      # Run Container
+      ####################################################
+
+      - name: Start Container
+        run: |
+          docker run -d \
+            --name react-app \
+            -p 8080:80 \
+            ddm-web-app:test
+
+      ####################################################
+      # Smoke Test
+      ####################################################
+
+      - name: Smoke Test
+        run: |
+
+          echo "Waiting for application..."
+
+          for i in {1..20}
+          do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080 || true)
+
+            if [ "$STATUS" = "200" ]; then
+              echo "Application is healthy"
+              exit 0
+            fi
+
+            echo "Attempt $i/20"
+            sleep 5
+          done
+
+          echo "Application failed health check"
+
+          docker logs react-app
+
+          exit 1
+
+      ####################################################
+      # Container Logs
+      ####################################################
+
+      - name: Show Container Logs
+        if: always()
+        run: |
+          docker logs react-app || true
+
+      ####################################################
+      # Cleanup
+      ####################################################
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f react-app || true
+          docker image prune -af || true
